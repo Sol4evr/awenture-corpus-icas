@@ -1,0 +1,52 @@
+name: Prepare immutable learner-safe Year 2 question PDFs
+on:
+  push:
+    paths: [.github/workflows/import-year2-learner-assets.yml]
+permissions:
+  contents: write
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build only from the validated app and pinned normal-Git sources
+        env:
+          GIT_LFS_SKIP_SMUDGE: '1'
+        run: |
+          if test -f derived/learner-safe-year2/index.json; then echo 'Already imported'; exit 0; fi
+          git clone --filter=blob:none --no-checkout https://github.com/Sol4evr/awenture.git /tmp/aw-year2-producer
+          git -C /tmp/aw-year2-producer checkout 083fa893905bd3975c8de99ca70c4cddcbbc1156
+          cd /tmp/aw-year2-producer
+          npm ci --no-audit --no-fund
+          npm run build:historical-y2
+      - name: Verify and publish question-only derivatives
+        run: |
+          if test -f derived/learner-safe-year2/index.json; then exit 0; fi
+          mkdir -p derived/learner-safe-year2
+          cp -r /tmp/aw-year2-producer/dist/original-icas/year2/* derived/learner-safe-year2/
+          find derived/learner-safe-year2 -name '*-answers.pdf' -delete
+          cd /tmp/aw-year2-producer
+          AW_CORPUS_OUTPUT="$GITHUB_WORKSPACE/derived/learner-safe-year2" node --input-type=module <<'JS'
+          import fs from 'node:fs';import path from 'node:path';import crypto from 'node:crypto';import {PDFDocument} from 'pdf-lib';
+          const runtime=JSON.parse(fs.readFileSync('bank/v6.13.1-original-paper-runtime.json'));
+          const sourceIndex=JSON.parse(fs.readFileSync('baseline/historical-corpus-v1-lfs-index.json'));
+          const report=JSON.parse(fs.readFileSync('dist/release-audit/historical-pdf-optimisation.json'));
+          const assets=[];
+          for(const p of runtime.papers){const folder=runtime.conditions[p.subject].folder;const relative=`${folder}/${p.year}-questions.pdf`;const bytes=fs.readFileSync(path.join(process.env.AW_CORPUS_OUTPUT,relative));const doc=await PDFDocument.load(bytes);const pages=p.subject==='Spelling'&&p.year===2016?2:p.questionEndPage;if(doc.getPageCount()!==pages)throw Error('Page boundary mismatch '+relative);const source=sourceIndex.objects.filter(x=>x.path.startsWith('source/original-icas/year2/'+folder+'/')&&path.basename(x.path).startsWith(p.year+' '));if(source.length!==1)throw Error('Ambiguous original source');assets.push({path:`original-icas/year2/${relative}`,corpusPath:`derived/learner-safe-year2/${relative}`,sha256:crypto.createHash('sha256').update(bytes).digest('hex'),size:bytes.length,pages,subject:p.subject,year:p.year,sourcePath:source[0].path,sourceSha256:source[0].oid,learnerOnly:true});}
+          if(assets.length!==22||assets.some(x=>x.corpusPath.includes('answers')))throw Error('Question-only asset contract');
+          fs.writeFileSync(path.join(process.env.AW_CORPUS_OUTPUT,'index.json'),JSON.stringify({schemaVersion:1,producerAppSha:'083fa893905bd3975c8de99ca70c4cddcbbc1156',learnerOnly:true,dpi:report.dpi,jpegQuality:report.jpegQuality,assets},null,2)+'\n');
+          JS
+      - name: Commit immutable normal-Git assets
+        run: |
+          git config user.name 'AWenture corpus importer'
+          git config user.email 'awenture-corpus@users.noreply.github.com'
+          git add derived/learner-safe-year2
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m 'Archive 22 governed learner-safe Year 2 question derivatives'
+          git push origin HEAD:main
