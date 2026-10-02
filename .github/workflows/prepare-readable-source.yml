@@ -1,0 +1,47 @@
+name: Prepare reviewed openable source
+on:
+  push:
+    paths: ['.github/workflows/prepare-readable-source.yml']
+permissions:
+  contents: write
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+      - run: python -m pip install 'pypdf[crypto]==6.10.0'
+      - name: Verify source and preserve every page content stream
+        run: |
+          python - <<'PY'
+          import pathlib,hashlib,json,io
+          from pypdf import PdfReader,PdfWriter
+          source=pathlib.Path('source/original-icas/year4/English yr 4/2019 ICAS English Paper B.pdf')
+          expected='109af09fb98f7f36678e98907519f07f27aa399a3ce8791839c01cd3dfa1ae93'
+          raw=source.read_bytes()
+          assert hashlib.sha256(raw).hexdigest()==expected
+          reader=PdfReader(io.BytesIO(raw))
+          assert reader.is_encrypted and reader.decrypt('')!=0
+          assert len(reader.pages)==40
+          before=[hashlib.sha256(p.get_contents().get_data()).hexdigest() for p in reader.pages]
+          writer=PdfWriter();writer.clone_document_from_reader(reader)
+          out=io.BytesIO();writer.write(out);data=out.getvalue()
+          plain=PdfReader(io.BytesIO(data))
+          assert not plain.is_encrypted and len(plain.pages)==40
+          assert before==[hashlib.sha256(p.get_contents().get_data()).hexdigest() for p in plain.pages]
+          target=pathlib.Path('derived/readable-sources/76c70ca554c7a811.bin');target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(data)
+          metadata={'sourcePath':str(source),'sourceSha256':expected,'derivedPath':str(target),'sha256':hashlib.sha256(data).hexdigest(),'size':len(data),'pageCount':40,'emptyPasswordOnly':True,'pageContentStreamsUnchanged':True,'generator':'pypdf 6.10.0'}
+          target.with_suffix('.json').write_text(json.dumps(metadata,indent=2)+'\n')
+          print(json.dumps(metadata))
+          
+          PY
+      - name: Commit immutable readable derivative
+        run: |
+          git config user.name 'AWenture corpus importer'
+          git config user.email '122612876+Sol4evr@users.noreply.github.com'
+          git add derived
+          git commit -m 'Preserve openable English 2019 page content without encryption flag'
+          git push origin HEAD:main
+          git rev-parse HEAD >> "$GITHUB_STEP_SUMMARY"
